@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RetinaGuard — Ocular Triage Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%230F172A'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%232DD4BF' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%232DD4BF'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="redfree" color-interpolation-filters="sRGB">
+    <feColorMatrix type="matrix" values="0 1 0 0 0  0 1 0 0 0  0 1 0 0 0  0 0 0 1 0"/>
+  </filter>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 32 32" width="30" height="30"><circle cx="16" cy="16" r="15" fill="#0F172A"/><circle cx="16" cy="16" r="7" fill="none" stroke="#2DD4BF" stroke-width="2.5"/><circle cx="16" cy="16" r="2.5" fill="#2DD4BF"/></svg>
+    <div><div class="brand-name">RetinaGuard</div><div class="brand-sub">Autonomous Diabetic Retinopathy &amp; Ocular Triage Studio</div></div>
+  </div>
+  <nav class="tabs" id="viewTabs">
+    <button class="tab active" data-view="workbench">Triage Workbench</button>
+    <button class="tab" data-view="compare">Progression Compare</button>
+    <button class="tab" data-view="referral">Referral Brief</button>
+  </nav>
+  <div class="top-actions">
+    <div class="rate-pill" id="ratePill" title="Sliding 1-hour window"><span id="rateText">5/5 Free Demo Screenings Left This Hour</span><span class="mono" id="rateTimer"></span></div>
+    <button class="btn ghost" id="btnHistory">History</button>
+    <button class="btn ghost" id="btnKeys"><span class="dot red" id="keyDot"></span>API Keys</button>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- LEFT: intake -->
+  <aside class="panel intake">
+    <h2 class="panel-title">Ocular Scan Intake &amp; Clinical Context</h2>
+
+    <label class="field-label">Scan Modality</label>
+    <div class="seg" id="modalitySeg">
+      <button class="active" data-v="auto">Auto-Detect</button>
+      <button data-v="fundus">Retinal Fundus Scan</button>
+      <button data-v="anterior">Anterior / External Eye Photo</button>
+    </div>
+
+    <div class="lens" id="lens">
+      <div class="lens-toolbar">
+        <button id="zIn" title="Zoom in">＋</button>
+        <button id="zOut" title="Zoom out">－</button>
+        <button id="zReset" title="Reset view">Reset</button>
+        <span class="sep"></span>
+        <button id="tRedFree" class="toggle" title="Red-free (green channel) filter — highlights hemorrhages & microaneurysms">Red-Free Green</button>
+        <button id="tContrast" class="toggle" title="High-contrast vessel mode — emphasises vasculature & exudates">High-Contrast Vessels</button>
+      </div>
+      <div class="dropzone" id="dropzone">
+        <div class="drop-empty" id="dropEmpty">
+          <div class="drop-icon">⬆</div>
+          <div><b>Drop an ocular scan</b> or click to browse</div>
+          <div class="muted small">JPG · PNG · WEBP</div>
+        </div>
+        <div class="viewport" id="viewport" hidden><img id="preview" alt="Ocular scan preview" draggable="false"></div>
+        <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" hidden>
+      </div>
+      <div class="lens-foot muted small"><span id="fileName">No image loaded</span><span class="mono" id="zoomLabel">100%</span></div>
+    </div>
+
+    <label class="field-label">1-Click Sample Scans</label>
+    <div class="samples" id="samples"></div>
+
+    <div class="grid2">
+      <div><label class="field-label" for="fLabel">Patient Label / ID</label><input id="fLabel" placeholder="e.g. PT-0042"></div>
+      <div><label class="field-label" for="fAge">Age</label><input id="fAge" type="number" min="0" max="120" placeholder="58"></div>
+      <div><label class="field-label" for="fDur">Diabetes Duration (yrs)</label><input id="fDur" type="number" min="0" max="80" step="0.5" placeholder="12"></div>
+      <div><label class="field-label" for="fHba">HbA1c %</label><input id="fHba" type="number" min="3" max="20" step="0.1" placeholder="8.4"></div>
+    </div>
+    <label class="field-label" for="fSym">Reported Symptoms</label>
+    <select id="fSym">
+      <option value="">None</option><option>Blurred vision</option><option>Floaters</option><option>Redness</option><option>Glare</option>
+      <option>Sudden vision loss</option><option>Blurred vision, Floaters</option>
+    </select>
+
+    <button class="btn primary big" id="btnRun">Run Ocular Triage Pipeline</button>
+    <div class="alert" id="runAlert" hidden></div>
+
+    <div class="run-timer" id="runTimer" hidden><span class="mono" id="timerVal">00.0s</span><span class="muted small" id="timerNote">elapsed</span></div>
+    <ol class="tracker" id="tracker"></ol>
+  </aside>
+
+  <!-- RIGHT: workbench -->
+  <section class="panel results">
+    <div class="view active" id="view-workbench"></div>
+    <div class="view" id="view-compare"></div>
+    <div class="view" id="view-referral"></div>
+  </section>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<!-- History drawer -->
+<aside class="drawer left" id="drawerHistory" aria-hidden="true">
+  <div class="drawer-head"><h3>Screening History</h3><button class="icon-btn" data-close>✕</button></div>
+  <div class="drawer-body" id="historyList"></div>
+</aside>
+
+<!-- Keys modal -->
+<div class="modal" id="modalKeys" hidden>
+  <div class="modal-card">
+    <div class="drawer-head"><h3>API Keys (Bring Your Own Key)</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="muted small">Keys are stored locally in <span class="mono">retinaguard.db</span> and sent only to Google / Groq. A <span class="mono">.env</span> file is also read if present.</p>
+    <label class="field-label">Gemini API Key <span class="mono muted">AIza…</span> <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get free key ↗</a></label>
+    <input id="kGemini" type="password" placeholder="AIza..." autocomplete="off">
+    <div class="muted small" id="kGeminiState"></div>
+    <label class="field-label">Groq API Key <span class="mono muted">gsk_…</span> <a href="https://console.groq.com/keys" target="_blank" rel="noopener">Get free key ↗</a></label>
+    <input id="kGroq" type="password" placeholder="gsk_..." autocomplete="off">
+    <div class="muted small" id="kGroqState"></div>
+    <div class="modal-actions"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="btnSaveKeys">Save Keys</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
