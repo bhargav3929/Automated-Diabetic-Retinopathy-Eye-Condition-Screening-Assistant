@@ -10,9 +10,7 @@ A local, single-page clinical triage workbench. Open it and you land directly in
 **Linux/VPS:** `./start.sh`
 **Manual:** `pip install -r requirements.txt && python run.py` → http://127.0.0.1:8002
 
-Then click **API Keys** and paste a free key:
-- Gemini (`AIza…`) — https://aistudio.google.com/apikey
-- Groq (`gsk_…`) — https://console.groq.com/keys
+Then click **API Keys** and paste a free Groq key (`gsk_…`) — https://console.groq.com/keys
 
 Keys are saved in `retinaguard.db`; `.env` (see `.env.example`) is also read. An in-app key wins over `.env`.
 
@@ -28,11 +26,11 @@ Keys are saved in `retinaguard.db`; `.env` (see `.env.example`) is also read. An
 
 Plus: progression compare, referral brief (copy / download `.md`), history drawer, and a grounded Co-Pilot (free — doesn't use quota).
 
-**Rate limit:** 5 full screenings per sliding hour (SQLite); HTTP 429 reports minutes/seconds remaining. Override with `RATE_LIMIT_PER_HOUR`.
+**Rate limit:** 15 full screenings per sliding hour (SQLite); HTTP 429 reports minutes/seconds remaining. Override with `RATE_LIMIT_PER_HOUR`.
 
 ## Providers
 
-Gemini REST (`gemini-3.8-flash`, auto-fallback to `gemini-3.6-flash` on 503/504) → Groq REST (`qwen/qwen3.8-27b`). Override via `GEMINI_MODEL`, `GEMINI_FALLBACK_MODEL`, `GROQ_MODEL`. If a model ID is unavailable on your account, set it in `.env`.
+Groq only (`GROQ_API_KEY`): `meta-llama/llama-4-scout-17b-16e-instruct`, auto-fallback to `llama-3.2-90b-vision-preview` then `llama-3.2-11b-vision-preview`. Override the primary via `GROQ_MODEL`. If a model ID is unavailable on your account, set it in `.env`.
 
 Dependencies are limited to `fastapi, uvicorn, httpx, python-dotenv, pillow, python-multipart` — no numpy/opencv/langchain.
 

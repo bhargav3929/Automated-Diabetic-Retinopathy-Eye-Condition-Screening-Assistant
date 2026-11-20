@@ -13,9 +13,9 @@ _lock = threading.Lock()
 
 def limit_per_hour() -> int:
     try:
-        return max(1, int(os.getenv("RATE_LIMIT_PER_HOUR", "5")))
+        return max(1, int(os.getenv("RATE_LIMIT_PER_HOUR", "15")))
     except ValueError:
-        return 5
+        return 15
 
 
 def _conn():
@@ -59,7 +59,7 @@ def set_setting(key: str, value: str):
 
 def resolve_key(provider: str):
     """Returns (key, source). DB-saved key wins over .env."""
-    env_name = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}[provider]
+    env_name = {"groq": "GROQ_API_KEY"}[provider]
     k = get_setting(f"{provider}_key")
     if k:
         return k, "app"

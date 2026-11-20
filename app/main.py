@@ -41,7 +41,7 @@ async def index():
 
 
 def _keys():
-    return {p: db.resolve_key(p)[0] for p in ("gemini", "groq")}
+    return {p: db.resolve_key(p)[0] for p in ("groq",)}
 
 
 def _mask(k):
@@ -60,20 +60,19 @@ async def status():
 
 def _key_info():
     out = {}
-    for p in ("gemini", "groq"):
+    for p in ("groq",):
         k, src = db.resolve_key(p)
         out[p] = {"set": bool(k), "source": src, "masked": _mask(k)}
     return out
 
 
 class KeysIn(BaseModel):
-    gemini: str | None = None
     groq: str | None = None
 
 
 @app.post("/api/keys")
 async def save_keys(body: KeysIn):
-    for p in ("gemini", "groq"):
+    for p in ("groq",):
         v = (getattr(body, p) or "").strip()
         if v:
             db.set_setting(f"{p}_key", v)
@@ -82,7 +81,7 @@ async def save_keys(body: KeysIn):
 
 @app.delete("/api/keys/{provider}")
 async def clear_key(provider: str):
-    if provider not in ("gemini", "groq"):
+    if provider != "groq":
         raise HTTPException(404)
     db.set_setting(f"{provider}_key", "")
     return _key_info()
@@ -124,8 +123,8 @@ async def screen(
     symptoms: str = Form(""),
 ):
     keys = _keys()
-    if not (keys["gemini"] or keys["groq"]):
-        raise HTTPException(400, "No API key configured. Click 'API Keys' and add a free Gemini or Groq key.")
+    if not keys["groq"]:
+        raise HTTPException(400, "No API key configured. Click 'API Keys' and add a free Groq key (gsk_...).")
     rl = db.rate_status()
     if rl["remaining"] <= 0:
         raise HTTPException(

@@ -1,8 +1,7 @@
-"""Direct REST clients for Gemini (primary) and Groq (hedge). No SDKs, no C-extensions.
+"""Direct REST client for Groq (vision). No SDKs, no C-extensions.
 
-call_model() uses hedged racing: Gemini starts first; if it errors (429/503/504/...) or takes longer than
-HEDGE_AFTER seconds, Groq is launched in parallel and whichever answers first wins. A provider that fails
-is skipped for BREAKER_SECONDS (circuit breaker).
+call_model() tries the primary Groq vision model first, then falls back to the next model in the chain
+on any failure (model unavailable, 429/5xx, timeout, bad JSON).
 """
 import asyncio
 import base64
@@ -13,11 +12,12 @@ import time
 
 import httpx
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-HEDGE_AFTER = 5.0
-BREAKER_SECONDS = 120.0
-_broken_until: dict[str, float] = {}
+DEFAULT_MODELS = [
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.2-90b-vision-preview",
+    "llama-3.2-11b-vision-preview",
+]
 
 
 class LLMError(Exception):
@@ -30,11 +30,13 @@ class _HTTP(Exception):
         self.code = code
 
 
+def model_chain() -> list[str]:
+    first = os.getenv("GROQ_MODEL", "").strip()
+    return ([first] if first else []) + [m for m in DEFAULT_MODELS if m != first]
+
+
 def models():
-    return {
-        "gemini": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
-        "groq": os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
-    }
+    return {"groq": model_chain()[0]}
 
 
 def _strip_think(t: str) -> str:
@@ -58,25 +60,6 @@ def parse_json(text: str) -> dict:
         raise LLMError("Model returned non-JSON output")
 
 
-async def _gemini(key, model, system, prompt, image, json_mode, timeout, max_tokens):
-    parts = [{"text": prompt}]
-    if image:
-        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(image).decode()}})
-    gen = {"temperature": 0.2, "maxOutputTokens": max_tokens}
-    if json_mode:
-        gen["responseMimeType"] = "application/json"
-    body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": parts}], "generationConfig": gen}
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(GEMINI_URL.format(model=model), json=body, headers={"x-goog-api-key": key, "Content-Type": "application/json"})
-    if r.status_code != 200:
-        raise _HTTP(r.status_code, r.text[:300])
-    d = r.json()
-    try:
-        return "".join(p.get("text", "") for p in d["candidates"][0]["content"]["parts"])
-    except (KeyError, IndexError):
-        raise LLMError(f"Gemini returned no content: {str(d)[:200]}")
-
-
 async def _groq(key, model, system, prompt, image, json_mode, timeout, max_tokens):
     if image:
         user = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}}]
@@ -96,66 +79,23 @@ async def _groq(key, model, system, prompt, image, json_mode, timeout, max_token
         raise LLMError("Groq returned no content")
 
 
-async def _run(provider, keys, system, prompt, image, json_mode, timeout, max_tokens):
-    """One provider attempt -> (result, meta). Trips the circuit breaker on failure."""
-    m = models()
-    t0 = time.perf_counter()
-    try:
-        if provider == "gemini":
-            text = await _gemini(keys["gemini"], m["gemini"], system, prompt, image, json_mode, timeout, max_tokens)
-            model = m["gemini"]
-        else:
-            text = await _groq(keys["groq"], m["groq"], system, prompt, image, json_mode, timeout, max_tokens)
-            model = m["groq"]
-        out = parse_json(text) if json_mode else _strip_think(text)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        _broken_until[provider] = time.monotonic() + BREAKER_SECONDS
-        if isinstance(e, httpx.TimeoutException):
-            raise LLMError(f"{provider.title()} timed out after {timeout:.0f}s")
-        raise LLMError(f"{provider.title()}: {type(e).__name__} {e}")
-    return out, {"provider": provider.title(), "model": model, "latency_ms": int((time.perf_counter() - t0) * 1000)}
-
-
-def _order(keys):
-    avail = [p for p in ("gemini", "groq") if keys.get(p)]
-    now = time.monotonic()
-    healthy = [p for p in avail if _broken_until.get(p, 0) <= now]
-    return healthy or avail  # if everything is tripped, try anyway
-
-
 async def call_model(keys: dict, system: str, prompt: str, image: bytes | None = None, json_mode: bool = True,
-                     timeout: float = 20.0, max_tokens: int = 1000, hedge_after: float = HEDGE_AFTER):
-    """Returns (result, meta). Gemini first; Groq joins the race on error or after `hedge_after` seconds."""
-    order = _order(keys)
-    if not order:
-        raise LLMError("No API key configured. Open 'API Keys' and add a Gemini or Groq key.")
-
-    def start(p):
-        return asyncio.create_task(_run(p, keys, system, prompt, image, json_mode, timeout, max_tokens))
-
-    tasks = {start(order[0]): order[0]}
-    pending_second = order[1:]
+                     timeout: float = 20.0, max_tokens: int = 1000):
+    """Returns (result, meta). Groq only; falls back through the vision model chain on failure."""
+    key = keys.get("groq")
+    if not key:
+        raise LLMError("No Groq API key configured. Open 'API Keys' and add a Groq key (gsk_...).")
     errors = []
-    try:
-        while tasks:
-            wait_for = hedge_after if pending_second else None
-            done, _ = await asyncio.wait(tasks, timeout=wait_for, return_when=asyncio.FIRST_COMPLETED)
-            if not done:  # primary is slow -> hedge
-                p = pending_second.pop(0)
-                tasks[start(p)] = p
-                continue
-            for t in done:
-                p = tasks.pop(t)
-                try:
-                    return t.result()
-                except LLMError as e:
-                    errors.append(str(e))
-                    if pending_second:  # primary failed fast -> launch the hedge immediately
-                        q = pending_second.pop(0)
-                        tasks[start(q)] = q
-        raise LLMError("All providers failed. " + " | ".join(errors))
-    finally:
-        for t in tasks:
-            t.cancel()
+    for model in model_chain():
+        t0 = time.perf_counter()
+        try:
+            text = await _groq(key, model, system, prompt, image, json_mode, timeout, max_tokens)
+            out = parse_json(text) if json_mode else _strip_think(text)
+            return out, {"provider": "Groq", "model": model, "latency_ms": int((time.perf_counter() - t0) * 1000)}
+        except asyncio.CancelledError:
+            raise
+        except httpx.TimeoutException:
+            errors.append(f"{model}: timed out after {timeout:.0f}s")
+        except Exception as e:
+            errors.append(f"{model}: {type(e).__name__} {e}")
+    raise LLMError("Groq failed. " + " | ".join(errors))

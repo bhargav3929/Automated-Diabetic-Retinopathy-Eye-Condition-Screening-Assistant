@@ -38,7 +38,7 @@ async function refreshStatus() {
   } catch {}
 }
 function renderKeyDot() {
-  const any = state.keys.gemini?.set || state.keys.groq?.set;
+  const any = state.keys.groq?.set;
   $("#keyDot").className = "dot " + (any ? "green" : "red");
 }
 function renderRate() {
@@ -72,7 +72,7 @@ $("#btnHistory").onclick = async () => { await loadHistory(); openDrawer("drawer
 $("#btnKeys").onclick = async () => { await refreshStatus(); renderKeyStates(); $("#modalKeys").hidden = false; $("#scrim").hidden = true; };
 
 function renderKeyStates() {
-  for (const [p, el] of [["gemini", "#kGeminiState"], ["groq", "#kGroqState"]]) {
+  for (const [p, el] of [["groq", "#kGroqState"]]) {
     const k = state.keys[p];
     $(el).innerHTML = k?.set
       ? `✓ Saved (${esc(k.source)}) <span class="mono">${esc(k.masked)}</span> · <a href="#" data-clear="${p}">remove</a>`
@@ -86,10 +86,10 @@ $("#modalKeys").addEventListener("click", async (e) => {
   renderKeyStates(); renderKeyDot();
 });
 $("#btnSaveKeys").onclick = async () => {
-  const body = { gemini: $("#kGemini").value.trim(), groq: $("#kGroq").value.trim() };
-  if (!body.gemini && !body.groq) return toast("Enter at least one key");
+  const body = { groq: $("#kGroq").value.trim() };
+  if (!body.groq) return toast("Enter your Groq API key");
   state.keys = await api("/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  $("#kGemini").value = ""; $("#kGroq").value = "";
+  $("#kGroq").value = "";
   renderKeyDot(); renderKeyStates(); toast("API keys saved"); closeAll();
 };
 

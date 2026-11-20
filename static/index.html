@@ -25,7 +25,7 @@
     <button class="tab" data-view="referral">Referral Brief</button>
   </nav>
   <div class="top-actions">
-    <div class="rate-pill" id="ratePill" title="Sliding 1-hour window"><span id="rateText">5/5 Free Demo Screenings Left This Hour</span><span class="mono" id="rateTimer"></span></div>
+    <div class="rate-pill" id="ratePill" title="Sliding 1-hour window"><span id="rateText">15/15 Free Demo Screenings Left This Hour</span><span class="mono" id="rateTimer"></span></div>
     <button class="btn ghost" id="btnHistory">History</button>
     <button class="btn ghost" id="btnKeys"><span class="dot red" id="keyDot"></span>API Keys</button>
   </div>
@@ -106,10 +106,7 @@
 <div class="modal" id="modalKeys" hidden>
   <div class="modal-card">
     <div class="drawer-head"><h3>API Keys (Bring Your Own Key)</h3><button class="icon-btn" data-close>✕</button></div>
-    <p class="muted small">Keys are stored locally in <span class="mono">retinaguard.db</span> and sent only to Google / Groq. A <span class="mono">.env</span> file is also read if present.</p>
-    <label class="field-label">Gemini API Key <span class="mono muted">AIza…</span> <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get free key ↗</a></label>
-    <input id="kGemini" type="password" placeholder="AIza..." autocomplete="off">
-    <div class="muted small" id="kGeminiState"></div>
+    <p class="muted small">Keys are stored locally in <span class="mono">retinaguard.db</span> and sent only to Groq. A <span class="mono">.env</span> file is also read if present.</p>
     <label class="field-label">Groq API Key <span class="mono muted">gsk_…</span> <a href="https://console.groq.com/keys" target="_blank" rel="noopener">Get free key ↗</a></label>
     <input id="kGroq" type="password" placeholder="gsk_..." autocomplete="off">
     <div class="muted small" id="kGroqState"></div>
