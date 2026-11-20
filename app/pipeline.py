@@ -1,5 +1,6 @@
 """5-node clinical triage pipeline (pure Python). Nodes 2-4 run as ONE consolidated AI call; node 1 is a fast gatekeeper call."""
 import asyncio
+import logging
 import io
 import time
 from datetime import datetime
@@ -97,7 +98,7 @@ any quality, with or without laser scars) and any external/anterior eye photogra
 Also accept clear ophthalmic diagrams. REJECT ONLY clearly non-eye content (objects, plants, documents, screenshots, faces with no eye focus).
 When unsure, ACCEPT. Hint from user: {modality_pref}.
 JSON only: {{"is_ocular":true|false,"modality":"Retinal Fundus"|"Anterior Eye"|"None","gradability":"Adequate"|"Borderline"|"Ungradable","reason":"max 12 words"}}"""
-    d, meta = await call_model(keys, SYSTEM, prompt, _small(image), timeout=10.0, max_tokens=120)
+    d, meta = await call_model(keys, SYSTEM, prompt, _small(image), timeout=30.0, max_tokens=120)
     modality = _pick(d.get("modality"), ["Retinal Fundus", "Anterior Eye", "None"], "None")
     ocular = _bool(d.get("is_ocular"))
     if ocular and modality == "None":  # model said eye but no modality: use the user's hint, else fundus
@@ -129,7 +130,7 @@ Be concise. Return ONE JSON object:
 "cup_to_disc_ratio":number|null,"summary":"1 sentence",
 {grade},
 "triage":{{"urgency_tier":<exact tier>,"clinical_actions":["3 short items"],"systemic_actions":["2 short items"],"follow_up":"interval","rationale":"1 sentence"}}}}"""
-    return await call_model(keys, SYSTEM, prompt, image, timeout=20.0, max_tokens=1000)
+    return await call_model(keys, SYSTEM, prompt, image, timeout=90.0, max_tokens=1500)
 
 
 def parse_bio(d, modality):
@@ -313,7 +314,7 @@ def _ev(node, status, **kw):
     return {"event": "node", "node": node, "status": status, **kw}
 
 
-async def run_pipeline(keys, image: bytes, thumb: str, patient: dict, modality_pref: str):
+async def run_pipeline(keys, image: bytes, thumb: str, patient: dict, modality_pref: str, owner: str = "", on_success=None):
     """Yields NDJSON-ready events: start -> node(1..5) -> result. Two AI calls total."""
     T0 = time.perf_counter()
     timings, providers = {}, {}
@@ -329,9 +330,6 @@ async def run_pipeline(keys, image: bytes, thumb: str, patient: dict, modality_p
             msg = "Image rejected: this does not appear to be an eye or retinal photograph. " + gate["reason"]
             yield _ev(1, "failed", data=gate, latency_ms=timings["node1"], message=msg)
             yield {"event": "rejected", "message": msg + " (This did not use a screening slot.)"}
-            return
-        if not db.consume_slot():
-            yield {"event": "error", "message": "Hourly demo screening limit reached while the pipeline was running."}
             return
         yield _ev(1, "done", data=gate, latency_ms=timings["node1"], provider=providers["node1"])
         modality = gate["modality"]
@@ -358,7 +356,12 @@ async def run_pipeline(keys, image: bytes, thumb: str, patient: dict, modality_p
         timings["node5"] = 0
         timings["total"] = ms(T0)
         report = compile_report(patient, gate, bio, g, tri, timings, providers)
-        sid = db.save_screening(report, thumb)
+        if not db.consume_slot():  # charged only now, after every AI step succeeded
+            yield {"event": "error", "code": "RATE_LIMITED", "message": "Hourly demo screening limit reached while the pipeline was running."}
+            return
+        if on_success:
+            on_success()
+        sid = db.save_screening(report, thumb, owner)
         timings["node5"] = ms(t5)
         timings["total"] = ms(T0)
         yield _ev(5, "done", data={"id": sid}, latency_ms=timings["node5"], provider="Local")
@@ -366,6 +369,7 @@ async def run_pipeline(keys, image: bytes, thumb: str, patient: dict, modality_p
         report["id"] = sid
         yield {"event": "result", "report": report}
     except LLMError as e:
-        yield {"event": "error", "message": str(e)}
+        yield {"event": "error", "message": e.message, "code": e.code}
     except Exception as e:  # never let the stream die silently
-        yield {"event": "error", "message": f"Pipeline error: {type(e).__name__}: {e}"}
+        logging.getLogger("retinaguard").exception("pipeline failed: %s", type(e).__name__)
+        yield {"event": "error", "message": "The AI couldn't process this input.", "code": "AI_FAILED"}

@@ -18,10 +18,21 @@ function toast(msg) {
   const t = $("#toast"); t.textContent = msg; t.hidden = false;
   clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 2600);
 }
-async function api(path, opts) {
-  const r = await fetch(path, opts);
+// Demo ticket: read once from ?ticket=, keep in sessionStorage, hide from the address bar, send as a header.
+(function () {
+  try {
+    const u = new URL(location.href), t = u.searchParams.get("ticket");
+    if (t) { sessionStorage.setItem("lastsem_ticket", t); u.searchParams.delete("ticket"); history.replaceState(null, "", u.pathname + u.search + u.hash); }
+  } catch {}
+})();
+function authHeaders(h = {}) {
+  try { const t = sessionStorage.getItem("lastsem_ticket"); if (t) h["X-LastSem-Ticket"] = t; } catch {}
+  return h;
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: authHeaders({ ...(opts.headers || {}) }) });
   let body = null; try { body = await r.json(); } catch {}
-  if (!r.ok) { const e = new Error(body?.detail || `Request failed (${r.status})`); e.status = r.status; throw e; }
+  if (!r.ok) { const e = new Error(body?.error || `Request failed (${r.status})`); e.status = r.status; e.code = body?.code; throw e; }
   return body;
 }
 const riskCls = (r) => ({ Low: "low", Moderate: "moderate", Severe: "severe" }[r] || "moderate");
@@ -32,13 +43,14 @@ const mmss = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s %
 // ---------- status / rate pill ----------
 async function refreshStatus() {
   try {
-    const s = await api("/api/status");
-    state.rate = s.rate; state.rateAt = Date.now(); state.keys = s.keys;
+    const s = await api("api/status");
+    state.rate = s.rate; state.rateAt = Date.now(); state.keys = s.keys; state.mode = s.mode;
+    $("#btnKeys").hidden = s.mode === "demo";
     renderKeyDot(); renderRate();
   } catch {}
 }
 function renderKeyDot() {
-  const any = state.keys.groq?.set;
+  const any = state.keys.groq?.configured;
   $("#keyDot").className = "dot " + (any ? "green" : "red");
 }
 function renderRate() {
@@ -74,23 +86,25 @@ $("#btnKeys").onclick = async () => { await refreshStatus(); renderKeyStates(); 
 function renderKeyStates() {
   for (const [p, el] of [["groq", "#kGroqState"]]) {
     const k = state.keys[p];
-    $(el).innerHTML = k?.set
-      ? `✓ Saved (${esc(k.source)}) <span class="mono">${esc(k.masked)}</span> · <a href="#" data-clear="${p}">remove</a>`
+    $(el).innerHTML = k?.configured
+      ? `✓ Ready (${esc(k.source)}) <span class="mono">${esc(k.masked)}</span> · <a href="#" data-clear="${p}">remove</a>`
       : "Not set";
   }
 }
 $("#modalKeys").addEventListener("click", async (e) => {
   const c = e.target.closest("[data-clear]"); if (!c) return;
   e.preventDefault();
-  state.keys = await api("/api/keys/" + c.dataset.clear, { method: "DELETE" });
+  state.keys = await api("api/keys/" + c.dataset.clear, { method: "DELETE" });
   renderKeyStates(); renderKeyDot();
 });
 $("#btnSaveKeys").onclick = async () => {
   const body = { groq: $("#kGroq").value.trim() };
   if (!body.groq) return toast("Enter your Groq API key");
-  state.keys = await api("/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  $("#kGroq").value = "";
-  renderKeyDot(); renderKeyStates(); toast("API keys saved"); closeAll();
+  try {
+    await api("api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ groq_api_key: body.groq }) });
+  } catch (err) { return toast(err.message); }
+  $("#kGroq").value = ""; await refreshStatus();
+  renderKeyDot(); renderKeyStates(); toast("API key saved"); closeAll();
 };
 
 // ---------- intake: modality, samples, dropzone ----------
@@ -99,16 +113,20 @@ $("#modalitySeg").addEventListener("click", (e) => {
   state.modality = b.dataset.v; $$("#modalitySeg button").forEach((x) => x.classList.toggle("active", x === b));
 });
 async function loadSamples() {
-  try { SAMPLES = await api("/api/samples"); } catch { SAMPLES = []; }
-  $("#samples").innerHTML = SAMPLES.map((s) => `<button class="sample" data-id="${esc(s.id)}"><img src="${esc(s.url)}" alt="" loading="lazy">${esc(s.name)}</button>`).join("");
+  try { SAMPLES = (await api("api/samples")).samples; } catch { SAMPLES = []; }
+  $("#samples").innerHTML = SAMPLES.map((s) => `<button class="sample" data-id="${esc(s.id)}"><img src="${esc(s.input_url)}" alt="" loading="lazy">${esc(s.name)}</button>`).join("");
 }
 $("#samples").addEventListener("click", async (e) => {
   const b = e.target.closest(".sample"); if (!b) return;
   const s = SAMPLES.find((x) => x.id === b.dataset.id); if (!s) return;
   try {
-    const blob = await (await fetch(s.url)).blob();
+    const blob = await (await fetch(s.input_url)).blob();
     setFile(new File([blob], `${s.id}.jpg`, { type: "image/jpeg" }));
     $("#fLabel").value = s.ctx.label; $("#fAge").value = s.ctx.age; $("#fDur").value = s.ctx.dur; $("#fHba").value = s.ctx.hba; $("#fSym").value = s.ctx.sym;
+    if (s.has_saved_result) {  // instant saved result from a real earlier run; no AI call
+      const full = await api("api/samples/" + encodeURIComponent(s.id));
+      if (full.result) { state.report = full.result; renderWorkbench(); renderReferral(); setView("workbench"); toast("Saved sample result shown. Click Run for a live analysis."); }
+    }
   } catch { toast("Could not load sample"); }
 });
 
@@ -213,8 +231,8 @@ $("#btnRun").onclick = async () => {
     fd.append("file", blob, "scan.jpg"); fd.append("modality", state.modality);
     fd.append("label", $("#fLabel").value); fd.append("age", $("#fAge").value);
     fd.append("diabetes_years", $("#fDur").value); fd.append("hba1c", $("#fHba").value); fd.append("symptoms", $("#fSym").value);
-    const res = await fetch("/api/screen", { method: "POST", body: fd });
-    if (!res.ok) { let b = {}; try { b = await res.json(); } catch {} throw Object.assign(new Error(b.detail || "Request failed"), { status: res.status }); }
+    const res = await fetch("api/screen", { method: "POST", body: fd, headers: authHeaders() });
+    if (!res.ok) { let b = {}; try { b = await res.json(); } catch {} throw Object.assign(new Error(b.error || "Request failed"), { status: res.status }); }
     const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "";
     for (;;) {
       const { value, done } = await reader.read(); if (done) break;
@@ -278,16 +296,16 @@ function renderWorkbench() {
 
 // ---------- history ----------
 async function loadHistory() {
-  try { state.history = await api("/api/history"); } catch { state.history = []; }
+  try { state.history = await api("api/history"); } catch { state.history = []; }
   $("#historyList").innerHTML = state.history.length
     ? state.history.map((h) => `<div class="hitem" data-id="${h.id}"><img src="${esc(h.thumb)}" alt=""><div><div class="l">${esc(h.label)}</div><div class="s">${esc(h.stage_text)}</div><div class="s">${fmtTime(h.created_at)}</div></div><div><span class="badge ${riskBadge(h.risk_level)}">${esc(h.risk_level)}</span><div><a href="#" data-del="${h.id}" class="small">delete</a></div></div></div>`).join("")
     : `<div class="empty">No saved screenings yet.</div>`;
 }
 $("#historyList").addEventListener("click", async (e) => {
   const del = e.target.closest("[data-del]");
-  if (del) { e.preventDefault(); e.stopPropagation(); await api("/api/history/" + del.dataset.del, { method: "DELETE" }); await loadHistory(); return; }
+  if (del) { e.preventDefault(); e.stopPropagation(); await api("api/history/" + del.dataset.del, { method: "DELETE" }); await loadHistory(); return; }
   const it = e.target.closest(".hitem"); if (!it) return;
-  state.report = await api("/api/history/" + it.dataset.id);
+  state.report = await api("api/history/" + it.dataset.id);
   renderWorkbench(); renderReferral(); setView("workbench"); closeAll();
 });
 
@@ -303,7 +321,7 @@ async function renderCompare() {
   $("#cmpGo").onclick = async () => {
     const a = $("#cmpA").value, b = $("#cmpB").value;
     if (a === b) return toast("Pick two different screenings");
-    try { drawCompare(await api(`/api/compare?a=${a}&b=${b}`)); } catch (e) { toast(e.message); }
+    try { drawCompare(await api(`api/compare?a=${a}&b=${b}`)); } catch (e) { toast(e.message); }
   };
 }
 function drawCompare(d) {

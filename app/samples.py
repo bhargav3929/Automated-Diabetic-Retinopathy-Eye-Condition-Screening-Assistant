@@ -1,8 +1,10 @@
 """Real open-license eye / retina sample photographs from Wikimedia Commons.
 
-Downloaded once (if missing), resized to max 768x768 and stored as JPEG in static/samples/.
+Committed in samples/ (re-downloaded only if missing), resized to max 768x768, JPEG.
+Saved results live in samples/results/<id>.json, recorded from real live runs.
 """
 import io
+import json
 import logging
 from pathlib import Path
 
@@ -11,7 +13,8 @@ from PIL import Image
 
 log = logging.getLogger("retinaguard.samples")
 
-SAMPLES_DIR = Path(__file__).resolve().parent.parent / "static" / "samples"
+SAMPLES_DIR = Path(__file__).resolve().parent.parent / "samples"
+RESULTS_DIR = SAMPLES_DIR / "results"
 MAX_SIDE = 768
 # Wikimedia rejects generic browser UAs with 403; a descriptive client UA is accepted.
 UA = "RetinaGuardDemo/1.0 (https://example.org/retinaguard)"
@@ -59,6 +62,29 @@ def ensure_samples():
             log.warning("Could not download sample %s: %s", s["id"], e)
 
 
+def _by_id(sid: str):
+    return next((s for s in SAMPLES if s["id"] == sid), None)
+
+
+def saved_result(sid: str):
+    p = RESULTS_DIR / f"{sid}.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _public(s):
+    return {"id": s["id"], "title": s["name"], "name": s["name"], "ctx": s["ctx"],
+            "input_url": f"samples/{s['id']}.jpg", "has_saved_result": (RESULTS_DIR / f"{s['id']}.json").exists()}
+
+
 def available_samples():
-    return [{k: s[k] for k in ("id", "name", "ctx")} | {"url": f"/static/samples/{s['id']}.jpg"}
-            for s in SAMPLES if (SAMPLES_DIR / f"{s['id']}.jpg").exists()]
+    return [_public(s) for s in SAMPLES if (SAMPLES_DIR / f"{s['id']}.jpg").exists()]
+
+
+def sample_with_result(sid: str):
+    s = _by_id(sid)
+    if not s or not (SAMPLES_DIR / f"{s['id']}.jpg").exists():
+        return None
+    return _public(s) | {"result": saved_result(sid)}

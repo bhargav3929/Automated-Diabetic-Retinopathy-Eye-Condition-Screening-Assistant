@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import config
+
 DB_PATH = Path(__file__).resolve().parent.parent / "retinaguard.db"
 WINDOW_SECONDS = 3600
 _lock = threading.Lock()
@@ -38,8 +40,47 @@ def init_db():
                 urgency TEXT, confidence REAL,
                 thumb TEXT, report_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS ticket_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, tid TEXT NOT NULL, ts REAL NOT NULL);
             """
         )
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(screenings)")]
+        if "owner" not in cols:
+            c.execute("ALTER TABLE screenings ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+        purge_old(c)
+
+
+def purge_old(c=None):
+    """Demo mode: delete ticket runs and history older than 24 hours."""
+    if not config.DEMO_MODE:
+        return
+    cut = time.time() - 86400
+    own = c is None
+    c = c or _conn()
+    try:
+        c.execute("DELETE FROM ticket_runs WHERE ts < ?", (cut,))
+        c.execute("DELETE FROM screenings WHERE owner != '' AND created_at < ?", (cut,))
+        if own:
+            c.commit()
+    finally:
+        if own:
+            c.close()
+
+
+# ---------- demo ticket run counting ----------
+def ticket_runs_used(tid: str) -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) n FROM ticket_runs WHERE tid=?", (tid,)).fetchone()["n"]
+
+
+def runs_today() -> int:
+    day0 = time.time() - (time.time() % 86400)
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) n FROM ticket_runs WHERE ts >= ?", (day0,)).fetchone()["n"]
+
+
+def record_ticket_run(tid: str):
+    with _lock, _conn() as c:
+        c.execute("INSERT INTO ticket_runs(tid, ts) VALUES(?,?)", (tid, time.time()))
 
 
 # ---------- settings / keys ----------
@@ -60,13 +101,14 @@ def set_setting(key: str, value: str):
 def resolve_key(provider: str):
     """Returns (key, source). DB-saved key wins over .env."""
     env_name = {"groq": "GROQ_API_KEY"}[provider]
-    k = get_setting(f"{provider}_key")
-    if k:
-        return k, "app"
+    if not config.DEMO_MODE:  # demo: server environment only, saved keys are ignored
+        k = (get_setting(f"{provider}_key") or "").strip()
+        if config.usable_key(k):
+            return k, "ui"
     k = os.getenv(env_name, "").strip()
-    if k:
-        return k, ".env"
-    return None, None
+    if config.usable_key(k):
+        return k, "env"
+    return None, "none"
 
 
 # ---------- rate limiting ----------
@@ -93,16 +135,16 @@ def consume_slot() -> bool:
 
 
 # ---------- history ----------
-def save_screening(report: dict, thumb: str) -> int:
+def save_screening(report: dict, thumb: str, owner: str = "") -> int:
     g = report["grading"]
     with _lock, _conn() as c:
         cur = c.execute(
-            """INSERT INTO screenings(created_at,label,modality,kind,stage,stage_text,risk_level,urgency,confidence,thumb,report_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO screenings(created_at,label,modality,kind,stage,stage_text,risk_level,urgency,confidence,thumb,report_json,owner)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 report["created_at"], report["patient"].get("label") or "Unlabeled",
                 report["gatekeeper"]["modality"], g["kind"], g.get("stage"), g["headline"],
-                g["risk_level"], report["triage"]["urgency_tier"], g["confidence"], thumb, "{}",
+                g["risk_level"], report["triage"]["urgency_tier"], g["confidence"], thumb, "{}", owner,
             ),
         )
         sid = cur.lastrowid
@@ -111,18 +153,18 @@ def save_screening(report: dict, thumb: str) -> int:
         return sid
 
 
-def list_screenings(limit=100):
+def list_screenings(owner: str = "", limit=100):
     with _conn() as c:
         rows = c.execute(
-            "SELECT id,created_at,label,modality,kind,stage,stage_text,risk_level,urgency,confidence,thumb FROM screenings ORDER BY id DESC LIMIT ?",
-            (limit,),
+            "SELECT id,created_at,label,modality,kind,stage,stage_text,risk_level,urgency,confidence,thumb FROM screenings WHERE owner=? ORDER BY id DESC LIMIT ?",
+            (owner, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_screening(sid: int):
+def get_screening(sid: int, owner: str = ""):
     with _conn() as c:
-        r = c.execute("SELECT report_json, thumb FROM screenings WHERE id=?", (sid,)).fetchone()
+        r = c.execute("SELECT report_json, thumb FROM screenings WHERE id=? AND owner=?", (sid, owner)).fetchone()
     if not r:
         return None
     rep = json.loads(r["report_json"])
@@ -130,6 +172,6 @@ def get_screening(sid: int):
     return rep
 
 
-def delete_screening(sid: int):
+def delete_screening(sid: int, owner: str = ""):
     with _lock, _conn() as c:
-        c.execute("DELETE FROM screenings WHERE id=?", (sid,))
+        c.execute("DELETE FROM screenings WHERE id=? AND owner=?", (sid, owner))

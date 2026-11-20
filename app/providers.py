@@ -1,42 +1,45 @@
-"""Direct REST client for Groq (vision). No SDKs, no C-extensions.
+"""Direct REST client for Groq. No SDKs, no C-extensions. All AI access goes through call_model().
 
-call_model() tries the primary Groq vision model first, then falls back to the next model in the chain
-on any failure (model unavailable, 429/5xx, timeout, bad JSON).
+Every call has a timeout, retries 429/5xx/timeouts with exponential backoff, falls back to the fallback
+model, and turns failures into plain-English AppErrors (never the raw provider text or the key).
 """
 import asyncio
 import base64
 import json
-import os
+import logging
+import random
 import re
 import time
 
 import httpx
 
+from . import config
+from .errors import AppError
+
+log = logging.getLogger("retinaguard.ai")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_MODELS = [
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "llama-3.2-90b-vision-preview",
-    "llama-3.2-11b-vision-preview",
-]
-
-
-class LLMError(Exception):
-    pass
+RETRY_CODES = {429, 500, 502, 503, 504}
+ATTEMPTS = 3
+LLMError = AppError  # pipeline code catches this name
 
 
 class _HTTP(Exception):
     def __init__(self, code, body):
         super().__init__(f"HTTP {code}: {body}")
-        self.code = code
+        self.code, self.body = code, body
 
 
-def model_chain() -> list[str]:
-    first = os.getenv("GROQ_MODEL", "").strip()
-    return ([first] if first else []) + [m for m in DEFAULT_MODELS if m != first]
+def model_chain(vision: bool = True) -> list[str]:
+    a, b = (config.GROQ_VISION_MODEL, config.GROQ_VISION_FALLBACK_MODEL) if vision else (config.GROQ_MODEL, config.GROQ_FALLBACK_MODEL)
+    return [a] if a == b or not b else [a, b]
 
 
 def models():
     return {"groq": model_chain()[0]}
+
+
+def _redact(t) -> str:
+    return re.sub(r"gsk_[A-Za-z0-9]+", "gsk_***", str(t))
 
 
 def _strip_think(t: str) -> str:
@@ -57,7 +60,7 @@ def parse_json(text: str) -> dict:
                 return json.loads(t[a : b + 1])
             except json.JSONDecodeError:
                 pass
-        raise LLMError("Model returned non-JSON output")
+        raise ValueError("non-JSON output")
 
 
 async def _groq(key, model, system, prompt, image, json_mode, timeout, max_tokens):
@@ -74,28 +77,57 @@ async def _groq(key, model, system, prompt, image, json_mode, timeout, max_token
     if r.status_code != 200:
         raise _HTTP(r.status_code, r.text[:300])
     try:
-        return r.json()["choices"][0]["message"]["content"]
-    except (KeyError, IndexError):
-        raise LLMError("Groq returned no content")
+        return r.json()["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, ValueError):
+        raise ValueError("no content")
+
+
+def _wait_seconds(err, attempt: int) -> float:
+    if isinstance(err, _HTTP) and err.code == 429:
+        m = re.search(r"try again in ([\d.]+)\s*(ms|s)", err.body or "", re.I)
+        if m:
+            x = float(m.group(1)) / (1000 if m.group(2).lower() == "ms" else 1)
+            if x <= 20:
+                return x
+    return (2 ** attempt) + random.random() * 0.5
 
 
 async def call_model(keys: dict, system: str, prompt: str, image: bytes | None = None, json_mode: bool = True,
-                     timeout: float = 20.0, max_tokens: int = 1000):
-    """Returns (result, meta). Groq only; falls back through the vision model chain on failure."""
+                     timeout: float = 60.0, max_tokens: int = 1000):
+    """Returns (result, meta). Raises AppError with a plain message on failure."""
     key = keys.get("groq")
-    if not key:
-        raise LLMError("No Groq API key configured. Open 'API Keys' and add a Groq key (gsk_...).")
-    errors = []
-    for model in model_chain():
-        t0 = time.perf_counter()
-        try:
-            text = await _groq(key, model, system, prompt, image, json_mode, timeout, max_tokens)
-            out = parse_json(text) if json_mode else _strip_think(text)
-            return out, {"provider": "Groq", "model": model, "latency_ms": int((time.perf_counter() - t0) * 1000)}
-        except asyncio.CancelledError:
-            raise
-        except httpx.TimeoutException:
-            errors.append(f"{model}: timed out after {timeout:.0f}s")
-        except Exception as e:
-            errors.append(f"{model}: {type(e).__name__} {e}")
-    raise LLMError("Groq failed. " + " | ".join(errors))
+    if not config.usable_key(key):
+        raise AppError("AI_NOT_CONFIGURED")
+    saw_key_error = False
+    for model in model_chain(vision=bool(image)):
+        for attempt in range(ATTEMPTS):
+            t0 = time.perf_counter()
+            try:
+                text = await _groq(key, model, system, prompt, image, json_mode, timeout, max_tokens)
+                out = parse_json(text) if json_mode else _strip_think(text)
+                return out, {"provider": "Groq", "model": model, "latency_ms": int((time.perf_counter() - t0) * 1000)}
+            except asyncio.CancelledError:
+                raise
+            except _HTTP as e:
+                log.warning("Groq %s HTTP %s: %s", model, e.code, _redact(e.body))
+                if e.code == 401:
+                    saw_key_error = True
+                    break
+                if e.code not in RETRY_CODES:
+                    break
+                if attempt < ATTEMPTS - 1:
+                    await asyncio.sleep(_wait_seconds(e, attempt))
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                log.warning("Groq %s network error: %s", model, type(e).__name__)
+                if attempt < ATTEMPTS - 1:
+                    await asyncio.sleep(_wait_seconds(e, attempt))
+            except ValueError as e:
+                log.warning("Groq %s bad output: %s", model, e)
+                if attempt >= 1:  # invalid output: retry once only
+                    break
+            except Exception as e:
+                log.warning("Groq %s failed: %s", model, _redact(e))
+                break
+        if saw_key_error:
+            break
+    raise AppError("AI_KEY_INVALID" if saw_key_error else "AI_BUSY")
