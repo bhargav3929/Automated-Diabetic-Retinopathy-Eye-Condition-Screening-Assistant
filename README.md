@@ -62,3 +62,12 @@ samples/            sample photos; samples/results/ holds their saved results
 - **"Your Groq key was rejected":** open **API Keys** and paste a fresh key from https://console.groq.com/keys.
 - **Python not found:** install Python 3.10+ from https://www.python.org/downloads/ and run the start script again.
 - **Install failed:** check your internet connection and run the start script again; it continues where it stopped.
+
+Run the command:
+
+Windows (PowerShell):
+python -m venv .venv; .\.venv\Scripts\python.exe -m pip install -r requirements.txt; .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8002
+
+macOS / Linux (Terminal):
+python3 -m venv .venv && ./.venv/bin/python -m pip install -r requirements.txt && ./.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8002
+
